@@ -1,0 +1,4 @@
+azure-functions
+pandas
+azure-identity
+azure-storage-blob
