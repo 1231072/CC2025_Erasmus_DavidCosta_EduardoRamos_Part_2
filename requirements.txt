@@ -1,4 +1,4 @@
 azure-functions
-pandas==2.1.0
+pandas
 azure-identity
 azure-storage-blob
