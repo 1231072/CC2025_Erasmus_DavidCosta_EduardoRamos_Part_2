@@ -2,27 +2,24 @@ import logging
 import json
 import os
 import time
+import azure.functions as func
 from datetime import datetime
 from io import StringIO
 
 # Bibliotecas do Azure para acesso ao Storage e Identidade Gerida
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
+import pandas as pd # Biblioteca para processamento de dados
 
-# Biblioteca para processamento de dados
-import pandas as pd
-
-
+# --- VARIÁVEIS CRÍTICAS ---
+# AZURE_STORAGE_ACCOUNT_URL deve ser definido nos Application Settings do Azure Function.
 STORAGE_ACCOUNT_URL = os.environ.get("AZURE_STORAGE_ACCOUNT_URL")
 RAW_CONTAINER = "raw"
 PROCESSED_CONTAINER = "processed"
 
 # --------------------------------------------------------------------------------
 
-def process_and_harmonize_data(csv_data: str, output_base: str, run_ts: int):
-    """
-    Lógica de ETL: Calcula métricas de vendas e estrutura o JSON por dispositivo.
-    """
+def process_and_harmonize_data(csv_data: str, run_ts: int):
     # Lógica de transformação idêntica à do TransformationNotebook.py
     df = pd.read_csv(StringIO(csv_data))
     
@@ -63,7 +60,7 @@ def process_and_harmonize_data(csv_data: str, output_base: str, run_ts: int):
             "records": records.to_dict('records')
         }
         
-        #Preparar Nomes dos Ficheiros
+        # Preparar Nomes dos Ficheiros
         timestamp_folder = datetime.fromtimestamp(run_ts / 1000).strftime('%Y%m%d%H%M%S')
         
         latest_path = f"latest/device-{device_id}.json"
@@ -78,13 +75,16 @@ def process_and_harmonize_data(csv_data: str, output_base: str, run_ts: int):
     return output_blobs
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Função principal ativada por HTTP (ADF Web Activity).
-    """
+    
     logging.info('Python HTTP trigger function processed a request for ETL transformation.')
 
+    if not STORAGE_ACCOUNT_URL:
+        # Se a variável crucial estiver ausente, retornamos um erro 500 imediato
+        logging.error("CRITICAL: AZURE_STORAGE_ACCOUNT_URL is not configured.")
+        return func.HttpResponse("Processing failed: Storage Account URL setting is missing.", status_code=500)
+
     try:
-        # Receber o nome do ficheiro
+        # Receber o nome do ficheiro (Body)
         req_body = req.get_json()
         input_filename = req_body.get('fileName')
         
@@ -94,8 +94,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                  status_code=400
             )
             
-        #Inicializar o cliente do Azure Storage
+        # Inicializar o cliente do Azure Storage com Identidade Gerida
         credential = DefaultAzureCredential()
+        # Se STORAGE_ACCOUNT_URL não for um URL válido, a linha abaixo falhará.
         blob_service_client = BlobServiceClient(STORAGE_ACCOUNT_URL, credential=credential)
         
         # Read csv
@@ -107,7 +108,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         csv_data = download_stream.readall().decode('utf-8')
 
     except Exception as e:
-        logging.error(f"Error during input/client setup: {e}")
+        # Captura erros de MI, URL inválido, e BlobNotFound
+        logging.error(f"Error during input/client setup or storage access: {e}")
         return func.HttpResponse(
              f"Processing failed during input setup or storage access: {e}",
              status_code=500
@@ -116,7 +118,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     # Transform the data
     run_ts = int(time.time() * 1000)
     try:
-        output_blobs = process_and_harmonize_data(csv_data, PROCESSED_CONTAINER, run_ts)
+        # Note: PROCESSED_CONTAINER não é necessário aqui, pois a função foi ajustada para aceitar apenas csv_data e run_ts
+        output_blobs = process_and_harmonize_data(csv_data, run_ts) 
     except Exception as e:
         logging.error(f"Error during data processing: {e}")
         return func.HttpResponse(
@@ -124,7 +127,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
              status_code=500
         )
 
-    #Write JSON
+    # Write JSON
     try:
         container_client = blob_service_client.get_container_client(PROCESSED_CONTAINER)
         
@@ -143,12 +146,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
              status_code=500
         )
 
-    #Retornar ADF
+    # Retornar Sucesso ao ADF
     return func.HttpResponse(
         json.dumps({"status": "Success", "message": f"Processed {len(output_blobs)} output blobs successfully."}),
         mimetype="application/json",
         status_code=200
     )
-
-if __name__ == '__main__':
-    pass
